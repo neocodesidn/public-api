@@ -3,6 +3,14 @@ import { getText } from "../../core/http.js";
 import { sources } from "../../config/sources.js";
 
 const SOURCE = sources["roblox-newsroom"];
+const CATEGORIES = [
+  "Safety + Civility",
+  "Engineering",
+  "Careers",
+  "Product",
+  "Community",
+  "News"
+];
 
 function absoluteUrl(value, base = SOURCE.baseUrl) {
   if (!value) return null;
@@ -46,6 +54,24 @@ function articleLd($) {
   }) || {};
 }
 
+function splitListingLabel(text) {
+  const raw = clean(text)?.replace(/\s*Read more\s*$/i, "");
+  if (!raw) return { title: null, category: null };
+
+  const category = CATEGORIES.find((name) =>
+    raw.toLowerCase().startsWith(`${name.toLowerCase()} `)
+  );
+
+  if (category) {
+    return {
+      category,
+      title: clean(raw.slice(category.length))
+    };
+  }
+
+  return { title: raw, category: null };
+}
+
 export async function listNews({ limit = 20 } = {}) {
   const { body, finalUrl } = await getText(SOURCE.listingUrl);
   const $ = cheerio.load(body);
@@ -57,32 +83,47 @@ export async function listNews({ limit = 20 } = {}) {
     if (!url) return;
 
     const box = a.closest("article, li, div");
-    const title =
+    const heading =
       clean(a.find("h1,h2,h3,h4").first().text()) ||
-      clean(box.find("h1,h2,h3,h4").first().text()) ||
-      clean(a.attr("aria-label")) ||
-      clean(a.text());
+      clean(box.find("h1,h2,h3,h4").first().text());
 
+    const parsed = splitListingLabel(a.text());
+    const title = heading || parsed.title || clean(a.attr("aria-label"));
     if (!title || title.length < 8) return;
 
-    const img = a.find("img").first().length ? a.find("img").first() : box.find("img").first();
+    const img = a.find("img").first().length
+      ? a.find("img").first()
+      : box.find("img").first();
+
     const image = absoluteUrl(
       img.attr("src") || img.attr("data-src") || img.attr("data-lazy-src"),
       finalUrl
     );
 
     const time = box.find("time").first();
-    const publishedAt = normalizeDate(time.attr("datetime") || clean(time.text()));
+    const publishedAt = normalizeDate(
+      time.attr("datetime") || clean(time.text())
+    );
 
     const category =
+      parsed.category ||
       clean(box.find('[class*="category" i]').first().text()) ||
       clean(box.find('[class*="tag" i]').first().text()) ||
       null;
 
-    articles.push({ title, category, url, image, publishedAt });
+    articles.push({
+      title,
+      category,
+      url,
+      image,
+      publishedAt
+    });
   });
 
-  return uniqueByUrl(articles).slice(0, Math.max(1, Math.min(Number(limit) || 20, 50)));
+  return uniqueByUrl(articles).slice(
+    0,
+    Math.max(1, Math.min(Number(limit) || 20, 50))
+  );
 }
 
 export async function getArticle(slugOrUrl) {
@@ -126,7 +167,10 @@ export async function getArticle(slugOrUrl) {
     $('meta[property="article:modified_time"]').attr("content")
   );
 
-  const category = clean(ld.articleSection) || clean($('[class*="category" i]').first().text()) || null;
+  const category =
+    clean(ld.articleSection) ||
+    clean($('[class*="category" i]').first().text()) ||
+    null;
 
   let root = $("article").first();
   if (!root.length) root = $("main").first();
@@ -134,7 +178,9 @@ export async function getArticle(slugOrUrl) {
   const paragraphs = [];
   root.find("p, li").each((_, el) => {
     const text = clean($(el).text());
-    if (text && text.length > 20 && !paragraphs.includes(text)) paragraphs.push(text);
+    if (text && text.length > 20 && !paragraphs.includes(text)) {
+      paragraphs.push(text);
+    }
   });
 
   return {
