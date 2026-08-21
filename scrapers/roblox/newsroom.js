@@ -6,15 +6,17 @@ const SOURCE = sources["roblox-newsroom"];
 
 function absoluteUrl(value, base = SOURCE.baseUrl) {
   if (!value) return null;
-  try {
-    return new URL(value, base).href;
-  } catch {
-    return null;
-  }
+  try { return new URL(value, base).href; } catch { return null; }
 }
 
 function clean(value) {
   return value?.replace(/\s+/g, " ").trim() || null;
+}
+
+function normalizeDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? clean(value) : date.toISOString();
 }
 
 function uniqueByUrl(items) {
@@ -26,15 +28,22 @@ function uniqueByUrl(items) {
   });
 }
 
-function extractJsonLd($) {
-  const values = [];
+function jsonLd($) {
+  const out = [];
   $('script[type="application/ld+json"]').each((_, el) => {
     try {
-      const parsed = JSON.parse($(el).text());
-      values.push(...(Array.isArray(parsed) ? parsed : [parsed]));
+      const x = JSON.parse($(el).text());
+      out.push(...(Array.isArray(x) ? x : [x]));
     } catch {}
   });
-  return values;
+  return out;
+}
+
+function articleLd($) {
+  return jsonLd($).find((x) => {
+    const types = Array.isArray(x?.["@type"]) ? x["@type"] : [x?.["@type"]];
+    return types.some((t) => ["NewsArticle", "Article", "BlogPosting"].includes(t));
+  }) || {};
 }
 
 export async function listNews({ limit = 20 } = {}) {
@@ -42,41 +51,38 @@ export async function listNews({ limit = 20 } = {}) {
   const $ = cheerio.load(body);
   const articles = [];
 
-  // Prefer newsroom article URLs. Multiple selectors make the adapter
-  // resilient to moderate markup changes.
   $('a[href*="/newsroom/"]').each((_, el) => {
     const a = $(el);
-    const href = absoluteUrl(a.attr("href"), finalUrl);
-    if (!href || href.replace(/\/$/, "") === SOURCE.listingUrl.replace(/\/$/, "")) return;
+    const url = absoluteUrl(a.attr("href"), finalUrl);
+    if (!url) return;
 
-    const container = a.closest("article, li, div");
+    const box = a.closest("article, li, div");
     const title =
       clean(a.find("h1,h2,h3,h4").first().text()) ||
-      clean(container.find("h1,h2,h3,h4").first().text()) ||
+      clean(box.find("h1,h2,h3,h4").first().text()) ||
       clean(a.attr("aria-label")) ||
       clean(a.text());
 
     if (!title || title.length < 8) return;
 
-    const img = a.find("img").first().length ? a.find("img").first() : container.find("img").first();
+    const img = a.find("img").first().length ? a.find("img").first() : box.find("img").first();
     const image = absoluteUrl(
       img.attr("src") || img.attr("data-src") || img.attr("data-lazy-src"),
       finalUrl
     );
 
-    const time = container.find("time").first();
-    const publishedAt = time.attr("datetime") || clean(time.text());
+    const time = box.find("time").first();
+    const publishedAt = normalizeDate(time.attr("datetime") || clean(time.text()));
 
-    articles.push({
-      title,
-      url: href,
-      image,
-      publishedAt
-    });
+    const category =
+      clean(box.find('[class*="category" i]').first().text()) ||
+      clean(box.find('[class*="tag" i]').first().text()) ||
+      null;
+
+    articles.push({ title, category, url, image, publishedAt });
   });
 
-  const data = uniqueByUrl(articles).slice(0, Math.max(1, Math.min(Number(limit) || 20, 50)));
-  return data;
+  return uniqueByUrl(articles).slice(0, Math.max(1, Math.min(Number(limit) || 20, 50)));
 }
 
 export async function getArticle(slugOrUrl) {
@@ -86,52 +92,60 @@ export async function getArticle(slugOrUrl) {
 
   const { body, finalUrl } = await getText(url);
   const $ = cheerio.load(body);
-  const jsonLd = extractJsonLd($);
-
-  const articleLd = jsonLd.find((x) =>
-    ["NewsArticle", "Article", "BlogPosting"].includes(x?.["@type"])
-  ) || {};
+  const ld = articleLd($);
 
   const title =
-    clean(articleLd.headline) ||
+    clean(ld.headline) ||
     clean($('meta[property="og:title"]').attr("content")) ||
     clean($("h1").first().text());
 
   const description =
-    clean(articleLd.description) ||
+    clean(ld.description) ||
     clean($('meta[name="description"]').attr("content")) ||
     clean($('meta[property="og:description"]').attr("content"));
 
   const imageRaw =
-    (Array.isArray(articleLd.image) ? articleLd.image[0] : articleLd.image?.url || articleLd.image) ||
+    (Array.isArray(ld.image) ? ld.image[0] : ld.image?.url || ld.image) ||
     $('meta[property="og:image"]').attr("content");
 
   const author =
-    clean(articleLd.author?.name) ||
-    clean(Array.isArray(articleLd.author) ? articleLd.author[0]?.name : null) ||
-    clean($('[rel="author"]').first().text());
+    clean(ld.author?.name) ||
+    clean(Array.isArray(ld.author) ? ld.author[0]?.name : null) ||
+    clean($('[rel="author"]').first().text()) ||
+    clean($('[class*="author" i]').first().text());
 
-  const publishedAt =
-    articleLd.datePublished ||
+  const publishedAt = normalizeDate(
+    ld.datePublished ||
+    $('meta[property="article:published_time"]').attr("content") ||
     $("time").first().attr("datetime") ||
-    clean($("time").first().text());
+    clean($("time").first().text())
+  );
 
-  let articleRoot = $("article").first();
-  if (!articleRoot.length) articleRoot = $("main").first();
+  const modifiedAt = normalizeDate(
+    ld.dateModified ||
+    $('meta[property="article:modified_time"]').attr("content")
+  );
+
+  const category = clean(ld.articleSection) || clean($('[class*="category" i]').first().text()) || null;
+
+  let root = $("article").first();
+  if (!root.length) root = $("main").first();
 
   const paragraphs = [];
-  articleRoot.find("p").each((_, el) => {
+  root.find("p, li").each((_, el) => {
     const text = clean($(el).text());
-    if (text && text.length > 20) paragraphs.push(text);
+    if (text && text.length > 20 && !paragraphs.includes(text)) paragraphs.push(text);
   });
 
   return {
     title,
+    category,
     url: finalUrl,
     description,
     image: absoluteUrl(imageRaw, finalUrl),
     author,
     publishedAt,
+    modifiedAt,
     content: paragraphs.join("\n\n")
   };
 }
