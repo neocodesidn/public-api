@@ -37,25 +37,6 @@ function uniqueByUrl(items) {
   });
 }
 
-// The Newsroom card exposes its navigation/filter label and title
-// in the same anchor text. The label is UI metadata, not part of
-// the article title, so remove it and return title only.
-function extractTitle(anchorText) {
-  let raw = clean(anchorText);
-  if (!raw) return null;
-
-  raw = raw.replace(/\s*Read more\s*$/i, "").trim();
-
-  for (const label of LISTING_LABELS) {
-    if (raw.toLowerCase().startsWith(label.toLowerCase())) {
-      raw = raw.slice(label.length).trim();
-      break;
-    }
-  }
-
-  return clean(raw);
-}
-
 function jsonLd($) {
   const out = [];
   $('script[type="application/ld+json"]').each((_, el) => {
@@ -74,6 +55,65 @@ function articleLd($) {
   }) || {};
 }
 
+function extractTitle(anchorText) {
+  let raw = clean(anchorText);
+  if (!raw) return null;
+
+  raw = raw.replace(/\s*Read more\s*$/i, "").trim();
+
+  for (const label of LISTING_LABELS) {
+    if (raw.toLowerCase().startsWith(label.toLowerCase())) {
+      raw = raw.slice(label.length).trim();
+      break;
+    }
+  }
+
+  return clean(raw);
+}
+
+// Fetch only the metadata needed by the listing.
+// We intentionally do not fetch article content here.
+async function getArticlePublishedAt(url) {
+  try {
+    const { body } = await getText(url);
+    const $ = cheerio.load(body);
+    const ld = articleLd($);
+
+    return normalizeDate(
+      ld.datePublished ||
+      $('meta[property="article:published_time"]').attr("content") ||
+      $('meta[name="publish-date"]').attr("content") ||
+      $('meta[name="date"]').attr("content") ||
+      $("time").first().attr("datetime") ||
+      clean($("time").first().text())
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function mapWithConcurrency(items, worker, concurrency = 4) {
+  const results = new Array(items.length);
+  let next = 0;
+
+  async function run() {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, items.length) },
+      () => run()
+    )
+  );
+
+  return results;
+}
+
 export async function listNews({ limit = 20 } = {}) {
   const { body, finalUrl } = await getText(SOURCE.listingUrl);
   const $ = cheerio.load(body);
@@ -85,10 +125,6 @@ export async function listNews({ limit = 20 } = {}) {
     if (!url) return;
 
     const box = a.closest("article, li, div");
-
-    // IMPORTANT:
-    // Do not use h1/h2/h3/h4 here. Roblox can render the category
-    // as a heading, which caused "Engineering" to become the title.
     const title = extractTitle(a.text());
 
     if (!title || title.length < 8) return;
@@ -105,7 +141,7 @@ export async function listNews({ limit = 20 } = {}) {
     );
 
     const time = box.find("time").first();
-    const publishedAt = normalizeDate(
+    const listingDate = normalizeDate(
       time.attr("datetime") || clean(time.text())
     );
 
@@ -113,14 +149,28 @@ export async function listNews({ limit = 20 } = {}) {
       title,
       url,
       image,
-      publishedAt
+      publishedAt: listingDate
     });
   });
 
-  return uniqueByUrl(articles).slice(
+  const unique = uniqueByUrl(articles).slice(
     0,
     Math.max(1, Math.min(Number(limit) || 20, 50))
   );
+
+  // Roblox does not expose publishedAt reliably on the listing cards.
+  // Enrich each listing from its article's structured metadata.
+  const enriched = await mapWithConcurrency(
+    unique,
+    async (item) => ({
+      ...item,
+      publishedAt:
+        item.publishedAt || await getArticlePublishedAt(item.url)
+    }),
+    4
+  );
+
+  return enriched;
 }
 
 export async function getArticle(slugOrUrl) {
