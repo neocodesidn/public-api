@@ -3,6 +3,7 @@ import { getText } from "../../core/http.js";
 import { sources } from "../../config/sources.js";
 
 const SOURCE = sources["roblox-newsroom"];
+
 const CATEGORIES = [
   "Safety + Civility",
   "Engineering",
@@ -40,8 +41,8 @@ function jsonLd($) {
   const out = [];
   $('script[type="application/ld+json"]').each((_, el) => {
     try {
-      const x = JSON.parse($(el).text());
-      out.push(...(Array.isArray(x) ? x : [x]));
+      const parsed = JSON.parse($(el).text());
+      out.push(...(Array.isArray(parsed) ? parsed : [parsed]));
     } catch {}
   });
   return out;
@@ -58,9 +59,12 @@ function splitListingLabel(text) {
   const raw = clean(text)?.replace(/\s*Read more\s*$/i, "");
   if (!raw) return { title: null, category: null };
 
-  const category = CATEGORIES.find((name) =>
-    raw.toLowerCase().startsWith(`${name.toLowerCase()} `)
-  );
+  const category = CATEGORIES.find((name) => {
+    const prefix = raw.slice(0, name.length);
+    const next = raw[name.length];
+    return prefix.toLowerCase() === name.toLowerCase() &&
+      (next === undefined || /\s/.test(next));
+  });
 
   if (category) {
     return {
@@ -83,12 +87,29 @@ export async function listNews({ limit = 20 } = {}) {
     if (!url) return;
 
     const box = a.closest("article, li, div");
-    const heading =
-      clean(a.find("h1,h2,h3,h4").first().text()) ||
-      clean(box.find("h1,h2,h3,h4").first().text());
 
+    // Roblox listing cards expose category + title + "Read more"
+    // as the anchor's combined text. Parse that first.
     const parsed = splitListingLabel(a.text());
-    const title = heading || parsed.title || clean(a.attr("aria-label"));
+
+    // Only fall back to headings when the anchor text does not contain
+    // a known category/title pair.
+    let title = parsed.title;
+    let category = parsed.category;
+
+    if (!title) {
+      title =
+        clean(a.find("h1,h2,h3,h4").first().text()) ||
+        clean(a.attr("aria-label"));
+    }
+
+    if (!category) {
+      category =
+        clean(box.find('[class*="category" i]').first().text()) ||
+        clean(box.find('[class*="tag" i]').first().text()) ||
+        null;
+    }
+
     if (!title || title.length < 8) return;
 
     const img = a.find("img").first().length
@@ -96,7 +117,9 @@ export async function listNews({ limit = 20 } = {}) {
       : box.find("img").first();
 
     const image = absoluteUrl(
-      img.attr("src") || img.attr("data-src") || img.attr("data-lazy-src"),
+      img.attr("src") ||
+      img.attr("data-src") ||
+      img.attr("data-lazy-src"),
       finalUrl
     );
 
@@ -104,12 +127,6 @@ export async function listNews({ limit = 20 } = {}) {
     const publishedAt = normalizeDate(
       time.attr("datetime") || clean(time.text())
     );
-
-    const category =
-      parsed.category ||
-      clean(box.find('[class*="category" i]').first().text()) ||
-      clean(box.find('[class*="tag" i]').first().text()) ||
-      null;
 
     articles.push({
       title,
@@ -146,7 +163,9 @@ export async function getArticle(slugOrUrl) {
     clean($('meta[property="og:description"]').attr("content"));
 
   const imageRaw =
-    (Array.isArray(ld.image) ? ld.image[0] : ld.image?.url || ld.image) ||
+    (Array.isArray(ld.image)
+      ? ld.image[0]
+      : ld.image?.url || ld.image) ||
     $('meta[property="og:image"]').attr("content");
 
   const author =
