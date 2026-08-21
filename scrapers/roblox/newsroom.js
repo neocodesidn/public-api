@@ -4,7 +4,7 @@ import { sources } from "../../config/sources.js";
 
 const SOURCE = sources["roblox-newsroom"];
 
-const CATEGORIES = [
+const LISTING_LABELS = [
   "Safety + Civility",
   "Engineering",
   "Careers",
@@ -37,6 +37,25 @@ function uniqueByUrl(items) {
   });
 }
 
+// The Newsroom card exposes its navigation/filter label and title
+// in the same anchor text. The label is UI metadata, not part of
+// the article title, so remove it and return title only.
+function extractTitle(anchorText) {
+  let raw = clean(anchorText);
+  if (!raw) return null;
+
+  raw = raw.replace(/\s*Read more\s*$/i, "").trim();
+
+  for (const label of LISTING_LABELS) {
+    if (raw.toLowerCase().startsWith(label.toLowerCase())) {
+      raw = raw.slice(label.length).trim();
+      break;
+    }
+  }
+
+  return clean(raw);
+}
+
 function jsonLd($) {
   const out = [];
   $('script[type="application/ld+json"]').each((_, el) => {
@@ -55,27 +74,6 @@ function articleLd($) {
   }) || {};
 }
 
-function splitListingLabel(text) {
-  const raw = clean(text)?.replace(/\s*Read more\s*$/i, "");
-  if (!raw) return { title: null, category: null };
-
-  const category = CATEGORIES.find((name) => {
-    const prefix = raw.slice(0, name.length);
-    const next = raw[name.length];
-    return prefix.toLowerCase() === name.toLowerCase() &&
-      (next === undefined || /\s/.test(next));
-  });
-
-  if (category) {
-    return {
-      category,
-      title: clean(raw.slice(category.length))
-    };
-  }
-
-  return { title: raw, category: null };
-}
-
 export async function listNews({ limit = 20 } = {}) {
   const { body, finalUrl } = await getText(SOURCE.listingUrl);
   const $ = cheerio.load(body);
@@ -88,27 +86,10 @@ export async function listNews({ limit = 20 } = {}) {
 
     const box = a.closest("article, li, div");
 
-    // Roblox listing cards expose category + title + "Read more"
-    // as the anchor's combined text. Parse that first.
-    const parsed = splitListingLabel(a.text());
-
-    // Only fall back to headings when the anchor text does not contain
-    // a known category/title pair.
-    let title = parsed.title;
-    let category = parsed.category;
-
-    if (!title) {
-      title =
-        clean(a.find("h1,h2,h3,h4").first().text()) ||
-        clean(a.attr("aria-label"));
-    }
-
-    if (!category) {
-      category =
-        clean(box.find('[class*="category" i]').first().text()) ||
-        clean(box.find('[class*="tag" i]').first().text()) ||
-        null;
-    }
+    // IMPORTANT:
+    // Do not use h1/h2/h3/h4 here. Roblox can render the category
+    // as a heading, which caused "Engineering" to become the title.
+    const title = extractTitle(a.text());
 
     if (!title || title.length < 8) return;
 
@@ -130,7 +111,6 @@ export async function listNews({ limit = 20 } = {}) {
 
     articles.push({
       title,
-      category,
       url,
       image,
       publishedAt
@@ -186,11 +166,6 @@ export async function getArticle(slugOrUrl) {
     $('meta[property="article:modified_time"]').attr("content")
   );
 
-  const category =
-    clean(ld.articleSection) ||
-    clean($('[class*="category" i]').first().text()) ||
-    null;
-
   let root = $("article").first();
   if (!root.length) root = $("main").first();
 
@@ -204,7 +179,6 @@ export async function getArticle(slugOrUrl) {
 
   return {
     title,
-    category,
     url: finalUrl,
     description,
     image: absoluteUrl(imageRaw, finalUrl),
